@@ -69,6 +69,60 @@ struct AILink {
     }
 } aiLink;
 
+
+// ==========================================
+// AI State Tracking Variables
+// ==========================================
+int currentCw = 31; // Default starting Contention Window
+int intervalTx = 0; // Packets sent in the current 100ms interval
+int intervalRx = 0; // Packets received in the current 100ms interval
+
+// Callbacks to count Tx and Rx in real-time (Direct Object Hooks)
+void AppTxCallback(Ptr<const Packet> packet) { 
+    intervalTx++; 
+}
+void AppRxCallback(Ptr<const Packet> packet, const Address& addr) { 
+    intervalRx++; 
+}
+
+
+
+void AILearningLoop()
+{
+    // 1. Build the State String (Tx, Rx, and current CW)
+    std::string stateStr = "TX=" + std::to_string(intervalTx) + 
+                           "_RX=" + std::to_string(intervalRx) + 
+                           "_CW=" + std::to_string(currentCw);
+    
+    // 2. Ask Python for the next Action (0: Decrease, 1: Keep, 2: Increase)
+    int action = aiLink.GetActionFromAI(stateStr);
+    
+    // Reset counters for the next 100ms interval
+    intervalTx = 0;
+    intervalRx = 0;
+
+    // 3. Process the Action based on the paper's discrete action space
+    if (action == 0 && currentCw > 7) {
+        currentCw = (currentCw + 1) / 2 - 1;  // Decrease (e.g., 31 -> 15 -> 7)
+    } else if (action == 2 && currentCw < 1023) {
+        currentCw = (currentCw + 1) * 2 - 1;  // Increase (e.g., 31 -> 63 -> 127)
+    }
+    // If action == 1, currentCw stays the same (Keep)
+
+    // 4. Forcefully apply the new CW to the MAC layer of all 40 STAs
+    for (int i = 0; i < NUMBER_OF_STATIONS; i++) {
+        std::string pathMin = "/NodeList/" + std::to_string(i) + "/DeviceList/*/$ns3::WifiNetDevice/Mac/BE_Txop/MinCw";
+        std::string pathMax = "/NodeList/" + std::to_string(i) + "/DeviceList/*/$ns3::WifiNetDevice/Mac/BE_Txop/MaxCw";
+        Config::Set(pathMin, UintegerValue(currentCw));
+        Config::Set(pathMax, UintegerValue(currentCw));
+    }
+    
+    // 5. Schedule this function to run again in 0.1 seconds
+    Simulator::Schedule(Seconds(0.1), &AILearningLoop);
+}
+
+
+
 // ==========================================
 // Simulation Variables & Callbacks
 // ==========================================
@@ -208,6 +262,9 @@ void SetupApplications(NodeContainer &APNode, NodeContainer &stationNodes, Ipv4I
     sinkApp.Start(Seconds(0.0));
     sinkApp.Stop(Seconds(SIMULATION_TIME));
 
+    // DIRECT HOOK: Connect Rx to the Packet Sink on the AP
+    sinkApp.Get(0)->TraceConnectWithoutContext("Rx", MakeCallback(&AppRxCallback));
+
     Ptr<UniformRandomVariable> randomStart = CreateObject<UniformRandomVariable>();
     randomStart->SetAttribute("Min", DoubleValue(0.0));
     randomStart->SetAttribute("Max", DoubleValue(0.05));
@@ -223,6 +280,9 @@ void SetupApplications(NodeContainer &APNode, NodeContainer &stationNodes, Ipv4I
         double start = randomStart->GetValue();
         clientApp.Start(Seconds(start));
         clientApp.Stop(Seconds(SIMULATION_TIME));
+
+        // DIRECT HOOK: Connect Tx to the UDP Client on this Station
+        clientApp.Get(0)->TraceConnectWithoutContext("Tx", MakeCallback(&AppTxCallback));
     }
 }
 
@@ -244,6 +304,14 @@ int main(int argc, char *argv[])
     SetupMobility(APNode, stationNodes);
     auto [apInterface, staInterfaces] = SetupInternet(APNode, stationNodes, apDevice, stationDevices);
     SetupApplications(APNode, stationNodes, apInterface);
+
+    // ==========================================
+    // INITIALIZE AI LEARNING LOOP & HOOKS
+    // ==========================================
+    
+    // Schedule the first AI decision at 0.1 seconds
+    Simulator::Schedule(Seconds(0.1), &AILearningLoop);
+
 
     std::string apTracePath = "/NodeList/" + std::to_string(NUMBER_OF_STATIONS) + "/DeviceList/*/$ns3::WifiNetDevice/Phy/MonitorSnifferRx";
     Config::Connect(apTracePath, MakeCallback(&MonitorSnifferRxCallback));
