@@ -1,0 +1,11 @@
+# Ignore everything in the repository
+*
+
+# But do not ignore the .gitignore file itself
+!.gitignore
+
+# Do not ignore the scratch folder itself
+!scratch/
+
+# Do not ignore the contents inside the scratch folder
+!scratch/**
