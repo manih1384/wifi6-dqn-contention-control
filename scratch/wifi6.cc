@@ -67,14 +67,12 @@ struct AgentLink {
 } AgentLink;
 
 
-// ==========================================
-// AI State Tracking Variables
-// ==========================================
+
+// Agent State Variables
 int currentCw = 31; 
 int intervalTx = 0; 
 int intervalRx = 0; 
-
-// FIX: Callback signatures must match exactly. 
+ 
 void AppTxCallback(Ptr<const Packet> packet) { 
     intervalTx++; 
 }
@@ -83,9 +81,6 @@ void AppRxCallback(Ptr<const Packet> packet, const Address& addr) {
 }
 
 
-// ==========================================
-// AI Loop
-// ==========================================
 void AILearningLoop()
 {
     std::string stateStr = "TX=" + std::to_string(intervalTx) + 
@@ -114,9 +109,6 @@ void AILearningLoop()
 }
 
 
-// ==========================================
-// Physical SINR Trace
-// ==========================================
 std::map<Mac48Address, double> stationSinrSum;
 std::map<Mac48Address, int> stationRxCount;
 std::map<Mac48Address, int> stationBeaconCount;
@@ -158,9 +150,6 @@ void MonitorSnifferRxCallback(std::string context, Ptr<const Packet> packet,
 }
 
 
-// ==========================================
-// Network Setup Functions
-// ==========================================
 std::pair<NetDeviceContainer, NetDeviceContainer> SetupWifiNetwork(NodeContainer &stationNodes, NodeContainer &APNode)
 {
     SpectrumWifiPhyHelper phy;
@@ -257,7 +246,6 @@ void SetupApplications(NodeContainer &APNode, NodeContainer &stationNodes, Ipv4I
     sinkApp.Start(Seconds(0.0));
     sinkApp.Stop(Seconds(SIMULATION_TIME));
 
-    // BULLETPROOF HOOK: Cast directly to PacketSink to bypass Config strings
     Ptr<PacketSink> sink = DynamicCast<PacketSink>(sinkApp.Get(0));
     sink->TraceConnectWithoutContext("Rx", MakeCallback(&AppRxCallback));
 
@@ -384,7 +372,7 @@ int main(int argc, char *argv[])
         Config::ConnectWithoutContext(macTxPath, MakeCallback(&AppTxCallback));
     }
 
-    // Schedule the first AI decision at 0.1 seconds
+    // Schedule the first Agent decision at 0.1 seconds
     Simulator::Schedule(Seconds(0.1), &AILearningLoop);
 
     std::string apTracePath = "/NodeList/" + std::to_string(NUMBER_OF_STATIONS) + "/DeviceList/*/$ns3::WifiNetDevice/Phy/MonitorSnifferRx";
@@ -394,10 +382,6 @@ int main(int argc, char *argv[])
     Ptr<FlowMonitor> flowMonitor = flowmonHelper.InstallAll();
 
     AgentLink.Init();
-    std::cout << "\n[ns-3] Testing AI Bridge before simulation starts..." << std::endl;
-    int testAction = AgentLink.GetActionFromAgent("TEST_STATE_COL=5_RET=2");
-    std::cout << "[ns-3] AI replied with action: " << testAction << std::endl;
-
     std::cout << "\nRunning UORA simulation for " << SIMULATION_TIME << " seconds..." << std::endl;
     
     Simulator::Stop(Seconds(SIMULATION_TIME));

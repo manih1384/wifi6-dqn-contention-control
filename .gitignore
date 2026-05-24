@@ -9,3 +9,6 @@
 
 # Do not ignore the contents inside the scratch folder
 !scratch/**
+
+
+!dqn_agent.py
