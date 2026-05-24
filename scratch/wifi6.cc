@@ -7,7 +7,8 @@
 #include "ns3/wifi-module.h"
 #include "ns3/spectrum-module.h"
 #include <map>
-
+#include "ns3/packet-sink.h"
+#include "ns3/udp-client.h"
 // NEW HEADERS FOR UDP SOCKET IPC
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -29,12 +30,14 @@ const std::string IP_BASE = "192.168.1.0";
 const std::string IP_MASK = "255.255.255.0";
 
 
+// ==========================================
+// C++ / Python IPC Bridge (The AI Link)
+// ==========================================
 struct AgentLink {
     int sock;
     struct sockaddr_in serv_addr;
     socklen_t addr_len;
 
-    // Initialize the local UDP socket
     void Init() {
         sock = socket(AF_INET, SOCK_DGRAM, 0);
         serv_addr.sin_family = AF_INET;
@@ -44,22 +47,18 @@ struct AgentLink {
         std::cout << "[ns-3] Connected to Python Agent Bridge on port 9999" << std::endl;
     }
 
-    
     int GetActionFromAgent(std::string stateString) {
-        // Send state to Python
         sendto(sock, stateString.c_str(), stateString.length(), 0, 
                (struct sockaddr *)&serv_addr, addr_len);
         
-        // Wait for Python to reply
         char buffer[256] = {0};
         int n = recvfrom(sock, buffer, 255, 0, (struct sockaddr *)&serv_addr, &addr_len);
         
         if (n > 0) {
             buffer[n] = '\0';
-            return std::stoi(buffer); // Expected returns: 0, 1, or 2
+            return std::stoi(buffer); 
         }
-        
-        return 1; // Default to 'Keep' if the socket fails
+        return 1; 
     }
 
     void Close() {
@@ -68,12 +67,14 @@ struct AgentLink {
 } AgentLink;
 
 
-// Agent states
-int currentCw = 31; // Default starting Contention Window
-int intervalTx = 0; // Packets sent in the current 100ms interval
-int intervalRx = 0; // Packets received in the current 100ms interval
+// ==========================================
+// AI State Tracking Variables
+// ==========================================
+int currentCw = 31; 
+int intervalTx = 0; 
+int intervalRx = 0; 
 
-// Callbacks to count Tx and Rx in real-time
+// FIX: Callback signatures must match exactly. 
 void AppTxCallback(Ptr<const Packet> packet) { 
     intervalTx++; 
 }
@@ -82,30 +83,26 @@ void AppRxCallback(Ptr<const Packet> packet, const Address& addr) {
 }
 
 
-
+// ==========================================
+// AI Loop
+// ==========================================
 void AILearningLoop()
 {
-    
     std::string stateStr = "TX=" + std::to_string(intervalTx) + 
                            "_RX=" + std::to_string(intervalRx) + 
                            "_CW=" + std::to_string(currentCw);
     
-    
     int action = AgentLink.GetActionFromAgent(stateStr);
     
-    // Reset counters for the next 100ms interval
     intervalTx = 0;
     intervalRx = 0;
 
-    // Min CW is 7 and Max CW is 1023
     if (action == 0 && currentCw > 7) {
         currentCw = (currentCw + 1) / 2 - 1;  // Decrease
     } else if (action == 2 && currentCw < 1023) {
         currentCw = (currentCw + 1) * 2 - 1;  // Increase
     }
-    // If action == 1, currentCw stays the same (Keep)
 
-    // apply the new CW to the MAC layer of all 40 STAs
     for (int i = 0; i < NUMBER_OF_STATIONS; i++) {
         std::string pathMin = "/NodeList/" + std::to_string(i) + "/DeviceList/*/$ns3::WifiNetDevice/Mac/BE_Txop/MinCw";
         std::string pathMax = "/NodeList/" + std::to_string(i) + "/DeviceList/*/$ns3::WifiNetDevice/Mac/BE_Txop/MaxCw";
@@ -113,13 +110,13 @@ void AILearningLoop()
         Config::Set(pathMax, UintegerValue(currentCw));
     }
     
-    // Schedule this function to run again in 0.1 seconds
     Simulator::Schedule(Seconds(0.1), &AILearningLoop);
 }
 
 
-
-
+// ==========================================
+// Physical SINR Trace
+// ==========================================
 std::map<Mac48Address, double> stationSinrSum;
 std::map<Mac48Address, int> stationRxCount;
 std::map<Mac48Address, int> stationBeaconCount;
@@ -160,6 +157,10 @@ void MonitorSnifferRxCallback(std::string context, Ptr<const Packet> packet,
     stationRxCount[srcAddr]++;
 }
 
+
+// ==========================================
+// Network Setup Functions
+// ==========================================
 std::pair<NetDeviceContainer, NetDeviceContainer> SetupWifiNetwork(NodeContainer &stationNodes, NodeContainer &APNode)
 {
     SpectrumWifiPhyHelper phy;
@@ -256,37 +257,115 @@ void SetupApplications(NodeContainer &APNode, NodeContainer &stationNodes, Ipv4I
     sinkApp.Start(Seconds(0.0));
     sinkApp.Stop(Seconds(SIMULATION_TIME));
 
-    // DIRECT HOOK: Connect Rx to the Packet Sink on the AP
-    sinkApp.Get(0)->TraceConnectWithoutContext("Rx", MakeCallback(&AppRxCallback));
+    // BULLETPROOF HOOK: Cast directly to PacketSink to bypass Config strings
+    Ptr<PacketSink> sink = DynamicCast<PacketSink>(sinkApp.Get(0));
+    sink->TraceConnectWithoutContext("Rx", MakeCallback(&AppRxCallback));
 
     Ptr<UniformRandomVariable> randomStart = CreateObject<UniformRandomVariable>();
     randomStart->SetAttribute("Min", DoubleValue(0.0));
     randomStart->SetAttribute("Max", DoubleValue(0.05));
 
     for (int i = 0; i < NUMBER_OF_STATIONS; i++)
-    {
-        UdpClientHelper client(apInterface.GetAddress(0), PORT_NUMBER);
-        client.SetAttribute("PacketSize", UintegerValue(PACKET_SIZE));
-        client.SetAttribute("Interval", TimeValue(Seconds(PACKET_INTERVAL)));
-        client.SetAttribute("MaxPackets", UintegerValue(100000));
+        {
+            UdpClientHelper client(apInterface.GetAddress(0), PORT_NUMBER);
+            client.SetAttribute("PacketSize", UintegerValue(PACKET_SIZE));
+            client.SetAttribute("Interval", TimeValue(Seconds(PACKET_INTERVAL)));
+            client.SetAttribute("MaxPackets", UintegerValue(100000));
 
-        ApplicationContainer clientApp = client.Install(stationNodes.Get(i));
-        double start = randomStart->GetValue();
-        clientApp.Start(Seconds(start));
-        clientApp.Stop(Seconds(SIMULATION_TIME));
-
-        // Connect Tx to the UDP Client on this Station
-        clientApp.Get(0)->TraceConnectWithoutContext("Tx", MakeCallback(&AppTxCallback));
-    }
+            ApplicationContainer clientApp = client.Install(stationNodes.Get(i));
+            double start = randomStart->GetValue();
+            clientApp.Start(Seconds(start));
+            clientApp.Stop(Seconds(SIMULATION_TIME));
+            
+        }
 }
 
 void DisplayFlowStatistics(Ptr<FlowMonitor> flowMonitor, FlowMonitorHelper &flowmonHelper)
 {
-    // Truncated for brevity
     flowMonitor->CheckForLostPackets();
-    std::cout << "\n===== Flow Statistics Evaluated =====" << std::endl;
+    Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmonHelper.GetClassifier());
+    std::map<FlowId, FlowMonitor::FlowStats> stats = flowMonitor->GetFlowStats();
+
+    double totalThroughput = 0.0, totalDelay = 0.0;
+    double totalTx = 0.0, totalRx = 0.0, totalLost = 0.0;
+    int numFlows = 0;
+    std::vector<double> throughputs;
+
+    std::cout << "\n===== UORA (802.11ax) Per-Node Flow Statistics =====" << std::endl;
+    
+    for (auto &flow : stats)
+    {
+        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(flow.first);
+
+        // Calculate true application-level loss
+        double txPackets = flow.second.txPackets;
+        double rxPackets = flow.second.rxPackets;
+        double trueLostPackets = txPackets - rxPackets;
+        
+        double duration = flow.second.timeLastRxPacket.GetSeconds() - 
+                         flow.second.timeFirstTxPacket.GetSeconds();
+        double throughput = (duration > 0 && rxPackets > 0) ? 
+                           flow.second.rxBytes * 8.0 / duration / 1000.0 : 0.0;
+        double avgDelay = (rxPackets > 0) ? 
+                         flow.second.delaySum.GetSeconds() / rxPackets : 0.0;
+        double lossPercent = (txPackets > 0) ? 
+                            (trueLostPackets / txPackets) * 100.0 : 0.0;
+
+        std::cout << "Flow " << numFlows + 1 << ": " << t.sourceAddress << " -> " << t.destinationAddress << std::endl;
+        std::cout << "  Tx: " << txPackets << "  Rx: " << rxPackets 
+                  << "  Lost: " << trueLostPackets << " (" << lossPercent << "%)" << std::endl;
+        std::cout << "  Throughput: " << throughput << " kbps  Avg Delay: " << avgDelay * 1000.0 << " ms\n" << std::endl;
+
+        throughputs.push_back(throughput);
+        totalThroughput += throughput;
+        totalDelay += avgDelay;
+        totalTx += txPackets;
+        totalRx += rxPackets;
+        totalLost += trueLostPackets;
+        numFlows++;
+    }
+
+    double sum = 0.0, sumSq = 0.0;
+    for (double t : throughputs) {
+        sum += t;
+        sumSq += t * t;
+    }
+    double jainIndex = (numFlows > 0 && sumSq > 0) ? (sum * sum) / (numFlows * sumSq) : 0.0;
+
+    double avgThroughput = totalThroughput / numFlows;
+    double avgDelay = totalDelay / numFlows;
+    double overallLoss = (totalTx > 0) ? (totalLost / totalTx) * 100.0 : 0.0;
+
+    std::cout << "=================================================" << std::endl;
+    std::cout << "SUMMARY" << std::endl;
+    std::cout << "=================================================" << std::endl;
+    std::cout << "Flows: " << numFlows << std::endl;
+    std::cout << "Total Tx: " << totalTx << " | Total Rx: " << totalRx 
+              << " | Lost: " << totalLost << " (" << overallLoss << "%)" << std::endl;
+    std::cout << "Average Throughput: " << avgThroughput << " kbps" << std::endl;
+    std::cout << "Total Throughput: " << totalThroughput << " kbps" << std::endl;
+    std::cout << "Average Delay: " << avgDelay * 1000.0 << " ms" << std::endl;
+    std::cout << "Jain's Fairness Index: " << jainIndex << std::endl;
+    
+    std::cout << "\n===== AP Received SINR Report =====" << std::endl;
+    for (auto& entry : stationSinrSum) {
+        // Skip the phantom A-MPDU MAC address 
+        if (entry.first == Mac48Address("00:00:00:01:00:00")) continue;
+
+        if (stationRxCount[entry.first] > 0) {
+            double avgSinrDb = 10.0 * log10(entry.second / stationRxCount[entry.first]);
+            std::cout << "STA MAC " << entry.first 
+                      << " | Rx PHY Bursts: " << stationRxCount[entry.first]
+                      << " | Avg SINR: " << avgSinrDb << " dB" << std::endl;
+        }
+    }
 }
 
+
+
+// ==========================================
+// MAIN FUNCTION
+// ==========================================
 int main(int argc, char *argv[])
 {
     NodeContainer stationNodes;
@@ -299,17 +378,20 @@ int main(int argc, char *argv[])
     auto [apInterface, staInterfaces] = SetupInternet(APNode, stationNodes, apDevice, stationDevices);
     SetupApplications(APNode, stationNodes, apInterface);
 
-    
+
+    for (int i = 0; i < NUMBER_OF_STATIONS; i++) {
+        std::string macTxPath = "/NodeList/" + std::to_string(i) + "/DeviceList/*/$ns3::WifiNetDevice/Mac/MacTx";
+        Config::ConnectWithoutContext(macTxPath, MakeCallback(&AppTxCallback));
+    }
+
     // Schedule the first AI decision at 0.1 seconds
     Simulator::Schedule(Seconds(0.1), &AILearningLoop);
-
 
     std::string apTracePath = "/NodeList/" + std::to_string(NUMBER_OF_STATIONS) + "/DeviceList/*/$ns3::WifiNetDevice/Phy/MonitorSnifferRx";
     Config::Connect(apTracePath, MakeCallback(&MonitorSnifferRxCallback));
 
     FlowMonitorHelper flowmonHelper;
     Ptr<FlowMonitor> flowMonitor = flowmonHelper.InstallAll();
-
 
     AgentLink.Init();
     std::cout << "\n[ns-3] Testing AI Bridge before simulation starts..." << std::endl;
@@ -322,7 +404,6 @@ int main(int argc, char *argv[])
     Simulator::Run();
 
     DisplayFlowStatistics(flowMonitor, flowmonHelper);
-    
     
     AgentLink.Close();
     Simulator::Destroy();
