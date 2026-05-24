@@ -28,10 +28,8 @@ const std::string SSID_NAME = "wifi6-uora-network";
 const std::string IP_BASE = "192.168.1.0";
 const std::string IP_MASK = "255.255.255.0";
 
-// ==========================================
-// C++ / Python IPC Bridge (The AI Link)
-// ==========================================
-struct AILink {
+
+struct AgentLink {
     int sock;
     struct sockaddr_in serv_addr;
     socklen_t addr_len;
@@ -43,22 +41,22 @@ struct AILink {
         serv_addr.sin_port = htons(9999);
         inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
         addr_len = sizeof(serv_addr);
-        std::cout << "[ns-3] Connected to Python AI Bridge on port 9999" << std::endl;
+        std::cout << "[ns-3] Connected to Python Agent Bridge on port 9999" << std::endl;
     }
 
-    // Send state to Python, freeze simulation, wait for the action
-    int GetActionFromAI(std::string stateString) {
+    
+    int GetActionFromAgent(std::string stateString) {
         // Send state to Python
         sendto(sock, stateString.c_str(), stateString.length(), 0, 
                (struct sockaddr *)&serv_addr, addr_len);
         
-        // Wait for Python to reply (ns-3 clock freezes while waiting)
+        // Wait for Python to reply
         char buffer[256] = {0};
         int n = recvfrom(sock, buffer, 255, 0, (struct sockaddr *)&serv_addr, &addr_len);
         
         if (n > 0) {
             buffer[n] = '\0';
-            return std::stoi(buffer); // Expected returns from paper: 0, 1, or 2
+            return std::stoi(buffer); // Expected returns: 0, 1, or 2
         }
         
         return 1; // Default to 'Keep' if the socket fails
@@ -67,17 +65,15 @@ struct AILink {
     void Close() {
         close(sock);
     }
-} aiLink;
+} AgentLink;
 
 
-// ==========================================
-// AI State Tracking Variables
-// ==========================================
+// Agent states
 int currentCw = 31; // Default starting Contention Window
 int intervalTx = 0; // Packets sent in the current 100ms interval
 int intervalRx = 0; // Packets received in the current 100ms interval
 
-// Callbacks to count Tx and Rx in real-time (Direct Object Hooks)
+// Callbacks to count Tx and Rx in real-time
 void AppTxCallback(Ptr<const Packet> packet) { 
     intervalTx++; 
 }
@@ -89,27 +85,27 @@ void AppRxCallback(Ptr<const Packet> packet, const Address& addr) {
 
 void AILearningLoop()
 {
-    // 1. Build the State String (Tx, Rx, and current CW)
+    
     std::string stateStr = "TX=" + std::to_string(intervalTx) + 
                            "_RX=" + std::to_string(intervalRx) + 
                            "_CW=" + std::to_string(currentCw);
     
-    // 2. Ask Python for the next Action (0: Decrease, 1: Keep, 2: Increase)
-    int action = aiLink.GetActionFromAI(stateStr);
+    
+    int action = AgentLink.GetActionFromAgent(stateStr);
     
     // Reset counters for the next 100ms interval
     intervalTx = 0;
     intervalRx = 0;
 
-    // 3. Process the Action based on the paper's discrete action space
+    // Min CW is 7 and Max CW is 1023
     if (action == 0 && currentCw > 7) {
-        currentCw = (currentCw + 1) / 2 - 1;  // Decrease (e.g., 31 -> 15 -> 7)
+        currentCw = (currentCw + 1) / 2 - 1;  // Decrease
     } else if (action == 2 && currentCw < 1023) {
-        currentCw = (currentCw + 1) * 2 - 1;  // Increase (e.g., 31 -> 63 -> 127)
+        currentCw = (currentCw + 1) * 2 - 1;  // Increase
     }
     // If action == 1, currentCw stays the same (Keep)
 
-    // 4. Forcefully apply the new CW to the MAC layer of all 40 STAs
+    // apply the new CW to the MAC layer of all 40 STAs
     for (int i = 0; i < NUMBER_OF_STATIONS; i++) {
         std::string pathMin = "/NodeList/" + std::to_string(i) + "/DeviceList/*/$ns3::WifiNetDevice/Mac/BE_Txop/MinCw";
         std::string pathMax = "/NodeList/" + std::to_string(i) + "/DeviceList/*/$ns3::WifiNetDevice/Mac/BE_Txop/MaxCw";
@@ -117,15 +113,13 @@ void AILearningLoop()
         Config::Set(pathMax, UintegerValue(currentCw));
     }
     
-    // 5. Schedule this function to run again in 0.1 seconds
+    // Schedule this function to run again in 0.1 seconds
     Simulator::Schedule(Seconds(0.1), &AILearningLoop);
 }
 
 
 
-// ==========================================
-// Simulation Variables & Callbacks
-// ==========================================
+
 std::map<Mac48Address, double> stationSinrSum;
 std::map<Mac48Address, int> stationRxCount;
 std::map<Mac48Address, int> stationBeaconCount;
@@ -281,14 +275,14 @@ void SetupApplications(NodeContainer &APNode, NodeContainer &stationNodes, Ipv4I
         clientApp.Start(Seconds(start));
         clientApp.Stop(Seconds(SIMULATION_TIME));
 
-        // DIRECT HOOK: Connect Tx to the UDP Client on this Station
+        // Connect Tx to the UDP Client on this Station
         clientApp.Get(0)->TraceConnectWithoutContext("Tx", MakeCallback(&AppTxCallback));
     }
 }
 
 void DisplayFlowStatistics(Ptr<FlowMonitor> flowMonitor, FlowMonitorHelper &flowmonHelper)
 {
-    // (Truncated for brevity, but this is your existing print function)
+    // Truncated for brevity
     flowMonitor->CheckForLostPackets();
     std::cout << "\n===== Flow Statistics Evaluated =====" << std::endl;
 }
@@ -305,9 +299,6 @@ int main(int argc, char *argv[])
     auto [apInterface, staInterfaces] = SetupInternet(APNode, stationNodes, apDevice, stationDevices);
     SetupApplications(APNode, stationNodes, apInterface);
 
-    // ==========================================
-    // INITIALIZE AI LEARNING LOOP & HOOKS
-    // ==========================================
     
     // Schedule the first AI decision at 0.1 seconds
     Simulator::Schedule(Seconds(0.1), &AILearningLoop);
@@ -319,12 +310,10 @@ int main(int argc, char *argv[])
     FlowMonitorHelper flowmonHelper;
     Ptr<FlowMonitor> flowMonitor = flowmonHelper.InstallAll();
 
-    // ==========================================
-    // INITIALIZE & TEST THE AI BRIDGE
-    // ==========================================
-    aiLink.Init();
+
+    AgentLink.Init();
     std::cout << "\n[ns-3] Testing AI Bridge before simulation starts..." << std::endl;
-    int testAction = aiLink.GetActionFromAI("TEST_STATE_COL=5_RET=2");
+    int testAction = AgentLink.GetActionFromAgent("TEST_STATE_COL=5_RET=2");
     std::cout << "[ns-3] AI replied with action: " << testAction << std::endl;
 
     std::cout << "\nRunning UORA simulation for " << SIMULATION_TIME << " seconds..." << std::endl;
@@ -334,8 +323,8 @@ int main(int argc, char *argv[])
 
     DisplayFlowStatistics(flowMonitor, flowmonHelper);
     
-    // CLOSE THE BRIDGE
-    aiLink.Close();
+    
+    AgentLink.Close();
     Simulator::Destroy();
 
     return 0;
