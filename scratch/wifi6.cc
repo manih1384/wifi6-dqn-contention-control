@@ -16,7 +16,7 @@
 
 using namespace ns3;
 
-const int NUMBER_OF_STATIONS = 100;
+const int NUMBER_OF_STATIONS = 40;
 const double MIN_DISTANCE = 5.0;
 const double MAX_DISTANCE = 30.0;
 const double AP_HEIGHT = 3.0;
@@ -30,6 +30,9 @@ const std::string IP_BASE = "192.168.1.0";
 const std::string IP_MASK = "255.255.255.0";
 
 
+// ==========================================
+// C++ / Python IPC Bridge (The AI Link)
+// ==========================================
 struct AgentLink {
     int sock;
     struct sockaddr_in serv_addr;
@@ -246,23 +249,23 @@ void SetupApplications(NodeContainer &APNode, NodeContainer &stationNodes, Ipv4I
     Ptr<PacketSink> sink = DynamicCast<PacketSink>(sinkApp.Get(0));
     sink->TraceConnectWithoutContext("Rx", MakeCallback(&AppRxCallback));
 
-    // Create a random variable generator for application lifetimes
-    Ptr<UniformRandomVariable> randomTime = CreateObject<UniformRandomVariable>();
+    Ptr<UniformRandomVariable> randomStart = CreateObject<UniformRandomVariable>();
+    randomStart->SetAttribute("Min", DoubleValue(0.0));
+    randomStart->SetAttribute("Max", DoubleValue(0.05));
 
     for (int i = 0; i < NUMBER_OF_STATIONS; i++)
-    {
-        UdpClientHelper client(apInterface.GetAddress(0), PORT_NUMBER);
-        client.SetAttribute("PacketSize", UintegerValue(PACKET_SIZE));
-        client.SetAttribute("Interval", TimeValue(Seconds(PACKET_INTERVAL))); // Safe, standard flat interval
-        client.SetAttribute("MaxPackets", UintegerValue(100000));
+        {
+            UdpClientHelper client(apInterface.GetAddress(0), PORT_NUMBER);
+            client.SetAttribute("PacketSize", UintegerValue(PACKET_SIZE));
+            client.SetAttribute("Interval", TimeValue(Seconds(PACKET_INTERVAL)));
+            client.SetAttribute("MaxPackets", UintegerValue(100000));
 
-        ApplicationContainer clientApp = client.Install(stationNodes.Get(i));
-        double startTime = randomTime->GetValue(0.0, SIMULATION_TIME * 0.5); // Starts between 0s and half-simulation
-        double stopTime  = randomTime->GetValue(startTime + 1.0, SIMULATION_TIME); // Stops anytime after running at least 1s
-        
-        clientApp.Start(Seconds(startTime));
-        clientApp.Stop(Seconds(stopTime));
-    }
+            ApplicationContainer clientApp = client.Install(stationNodes.Get(i));
+            double start = randomStart->GetValue();
+            clientApp.Start(Seconds(start));
+            clientApp.Stop(Seconds(SIMULATION_TIME));
+            
+        }
 }
 
 void DisplayFlowStatistics(Ptr<FlowMonitor> flowMonitor, FlowMonitorHelper &flowmonHelper)
